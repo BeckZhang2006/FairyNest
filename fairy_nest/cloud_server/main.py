@@ -67,8 +67,9 @@ except ImportError as e:
     SERVICES_AVAILABLE = False
 
 # ============== DATABASE ==============
-from database.db import init_db, get_db_session
+from database.db import init_db, get_db_session, AsyncSessionLocal
 from database.models import Device, Alarm, CSIData, VoiceCommand
+from sqlalchemy import select, desc
 
 # ============== MODELS ==============
 from pydantic import BaseModel
@@ -110,6 +111,9 @@ class DeviceConnection:
         self.csi_data_buffer: List[dict] = []
         self.audio_buffer = bytearray()
         self.is_recording = False
+        self.name = "FairyNest Device"
+        self.wifi_rssi = 0
+        self.firmware_version = ""
         
     async def send_json(self, data: dict):
         try:
@@ -249,6 +253,27 @@ async def device_websocket(websocket: WebSocket):
         # Authenticate and register device
         device_conn = await device_manager.connect(device_id, websocket)
         
+        # Update device in database
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(select(Device).where(Device.device_id == device_id))
+                db_device = result.scalar_one_or_none()
+                if not db_device:
+                    db_device = Device(
+                        device_id=device_id,
+                        name=device_id,
+                        api_key=api_key,
+                        is_online=True,
+                        last_seen=datetime.utcnow()
+                    )
+                    session.add(db_device)
+                else:
+                    db_device.is_online = True
+                    db_device.last_seen = datetime.utcnow()
+                await session.commit()
+        except Exception as e:
+            logger.error(f"Failed to update device in DB: {e}")
+        
         await websocket.send_json({
             "type": "auth_result",
             "success": True,
@@ -288,6 +313,17 @@ async def device_websocket(websocket: WebSocket):
     finally:
         if device_conn:
             await device_manager.disconnect(device_conn.device_id)
+            # Update device offline status in database
+            try:
+                async with AsyncSessionLocal() as session:
+                    result = await session.execute(select(Device).where(Device.device_id == device_conn.device_id))
+                    db_device = result.scalar_one_or_none()
+                    if db_device:
+                        db_device.is_online = False
+                        db_device.last_seen = datetime.utcnow()
+                        await session.commit()
+            except Exception as e:
+                logger.error(f"Failed to update device offline status: {e}")
 
 async def handle_text_message(device_conn: DeviceConnection, text: str):
     """Handle text/JSON messages from device"""
@@ -298,7 +334,23 @@ async def handle_text_message(device_conn: DeviceConnection, text: str):
         if msg_type == "device_status":
             # Device status update
             logger.debug(f"Status from {device_conn.device_id}: {data}")
-            # Store in database (async)
+            # Update connection fields
+            device_conn.name = data.get("name", device_conn.name)
+            device_conn.wifi_rssi = data.get("wifi_rssi", device_conn.wifi_rssi)
+            device_conn.firmware_version = data.get("firmware_version", device_conn.firmware_version)
+            # Update database
+            try:
+                async with AsyncSessionLocal() as session:
+                    result = await session.execute(select(Device).where(Device.device_id == device_conn.device_id))
+                    db_device = result.scalar_one_or_none()
+                    if db_device:
+                        db_device.name = device_conn.name
+                        db_device.wifi_rssi = device_conn.wifi_rssi
+                        db_device.firmware_version = device_conn.firmware_version
+                        db_device.last_seen = datetime.utcnow()
+                        await session.commit()
+            except Exception as e:
+                logger.error(f"Failed to update device status: {e}")
             
         elif msg_type == "voice_event":
             # Voice recording event
@@ -336,6 +388,21 @@ async def handle_text_message(device_conn: DeviceConnection, text: str):
             # CSI data batch
             csi_batch = data.get("data", [])
             device_conn.csi_data_buffer.extend(csi_batch)
+            # Store in database
+            try:
+                async with AsyncSessionLocal() as session:
+                    for point in csi_batch:
+                        if isinstance(point, dict):
+                            record = CSIData(
+                                device_id=device_conn.device_id,
+                                variance=point.get("variance"),
+                                presence_state="present" if point.get("presence") else "empty",
+                                timestamp=datetime.utcnow()
+                            )
+                            session.add(record)
+                    await session.commit()
+            except Exception as e:
+                logger.error(f"Failed to save CSI data: {e}")
             
         elif msg_type == "ping":
             await device_conn.send_json({"type": "pong"})
@@ -529,26 +596,51 @@ async def health_check():
 
 @app.get("/api/devices")
 async def list_devices():
-    """List all connected devices"""
-    return {
-        "devices": device_manager.get_all_devices(),
-        "count": len(device_manager.devices)
-    }
+    """List all devices from database with online status"""
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(Device))
+            db_devices = result.scalars().all()
+            devices = []
+            for d in db_devices:
+                conn = device_manager.get_device(d.device_id)
+                devices.append({
+                    "device_id": d.device_id,
+                    "name": d.name,
+                    "is_online": conn is not None,
+                    "wifi_rssi": d.wifi_rssi or 0,
+                    "firmware_version": d.firmware_version or "",
+                    "last_seen": d.last_seen.isoformat() if d.last_seen else None,
+                })
+            return {"devices": devices, "count": len(devices)}
+    except Exception as e:
+        logger.error(f"Failed to list devices: {e}")
+        return {"devices": [], "count": 0}
 
 @app.get("/api/devices/{device_id}")
 async def get_device(device_id: str):
-    """Get device details"""
-    conn = device_manager.get_device(device_id)
-    if not conn:
-        raise HTTPException(status_code=404, detail="Device not found")
-    
-    return {
-        "device_id": conn.device_id,
-        "connected_at": conn.connected_at.isoformat(),
-        "last_seen": conn.last_seen.isoformat(),
-        "is_recording": conn.is_recording,
-        "csi_buffer_size": len(conn.csi_data_buffer)
-    }
+    """Get device details from database"""
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(Device).where(Device.device_id == device_id))
+            db_device = result.scalar_one_or_none()
+            if not db_device:
+                raise HTTPException(status_code=404, detail="Device not found")
+            conn = device_manager.get_device(device_id)
+            return {
+                "device_id": db_device.device_id,
+                "name": db_device.name,
+                "is_online": conn is not None,
+                "wifi_rssi": db_device.wifi_rssi or 0,
+                "firmware_version": db_device.firmware_version or "",
+                "last_seen": db_device.last_seen.isoformat() if db_device.last_seen else None,
+                "is_recording": conn.is_recording if conn else False,
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get device: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/devices/{device_id}/command")
 async def send_command(device_id: str, command: dict):
@@ -562,17 +654,25 @@ async def send_command(device_id: str, command: dict):
 
 @app.get("/api/alarms/{device_id}")
 async def get_alarms(device_id: str):
-    """Get alarms for a device"""
-    # Return sample alarms (would query from DB in production)
-    return {
-        "device_id": device_id,
-        "alarms": [
-            {"index": 0, "enabled": True, "hour": 7, "minute": 30, 
-             "days": 0b0111110, "label": "工作日闹钟"},
-            {"index": 1, "enabled": True, "hour": 9, "minute": 0,
-             "days": 0b1000001, "label": "周末闹钟"},
-        ]
-    }
+    """Get alarms for a device from database"""
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(Alarm).where(Alarm.device_id == device_id))
+            db_alarms = result.scalars().all()
+            alarms = []
+            for a in db_alarms:
+                alarms.append({
+                    "index": a.alarm_index,
+                    "enabled": a.enabled,
+                    "hour": a.hour,
+                    "minute": a.minute,
+                    "days": a.days,
+                    "label": a.label,
+                })
+            return {"device_id": device_id, "alarms": alarms}
+    except Exception as e:
+        logger.error(f"Failed to get alarms: {e}")
+        return {"device_id": device_id, "alarms": []}
 
 @app.post("/api/alarms/{device_id}")
 async def set_alarm(device_id: str, alarm: AlarmConfig):
@@ -590,17 +690,24 @@ async def set_alarm(device_id: str, alarm: AlarmConfig):
 
 @app.get("/api/csi/{device_id}")
 async def get_csi_data(device_id: str, limit: int = 100):
-    """Get recent CSI data for a device"""
-    conn = device_manager.get_device(device_id)
-    if not conn:
-        raise HTTPException(status_code=404, detail="Device not found")
-    
-    data = conn.csi_data_buffer[-limit:]
-    return {
-        "device_id": device_id,
-        "count": len(data),
-        "data": data
-    }
+    """Get recent CSI data for a device from database"""
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(CSIData).where(CSIData.device_id == device_id).order_by(desc(CSIData.timestamp)).limit(limit)
+            )
+            db_records = result.scalars().all()
+            data = []
+            for r in reversed(db_records):
+                data.append({
+                    "time": r.timestamp.timestamp() if r.timestamp else 0,
+                    "variance": r.variance or 0,
+                    "presence": 1 if (r.presence_state and r.presence_state != "empty") else 0,
+                })
+            return {"device_id": device_id, "count": len(data), "data": data}
+    except Exception as e:
+        logger.error(f"Failed to get CSI data: {e}")
+        return {"device_id": device_id, "count": 0, "data": []}
 
 @app.post("/api/csi/threshold")
 async def set_csi_threshold(update: CSIThresholdUpdate):
