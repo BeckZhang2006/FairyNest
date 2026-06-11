@@ -366,12 +366,12 @@ function SidebarButton({ icon, label, active, onClick }: { icon: React.ReactNode
 function DashboardTab({
   devices,
   csiThreshold,
+  voiceLogs,
   isNightMode,
   currentTime,
   nextAlarm,
 }: {
   devices: Device[]
-  alarms: Alarm[]
   csiThreshold: number
   voiceLogs: VoiceLog[]
   isNightMode: boolean
