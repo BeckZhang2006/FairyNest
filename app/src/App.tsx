@@ -318,7 +318,6 @@ function App() {
             {activeTab === 'dashboard' && (
               <DashboardTab
                 devices={devices}
-                alarms={alarms}
                 csiThreshold={csiThreshold}
                 voiceLogs={voiceLogs}
                 isNightMode={isNightMode}
