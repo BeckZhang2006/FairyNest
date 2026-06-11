@@ -49,27 +49,7 @@ interface CSIPoint {
   presence: number
 }
 
-// ============== MOCK DATA ==============
-const mockDevices: Device[] = [
-  { device_id: 'FAIRY_001', name: '卧室床头灯', is_online: true, wifi_rssi: -45, firmware_version: '1.0.0' },
-]
 
-const mockAlarms: Alarm[] = [
-  { index: 0, enabled: true, hour: 7, minute: 30, days: 0b0111110, label: '工作日闹钟' },
-  { index: 1, enabled: true, hour: 9, minute: 0, days: 0b1000001, label: '周末闹钟' },
-]
-
-const mockCSIHistory: CSIPoint[] = Array.from({ length: 60 }, (_, i) => ({
-  time: i,
-  variance: 10 + Math.sin(i * 0.2) * 5 + Math.random() * 2,
-  presence: Math.sin(i * 0.1) > 0 ? 1 : 0,
-}))
-
-const mockVoiceLogs: VoiceLog[] = [
-  { time: '07:30', text: '早上好，该起床了', type: 'assistant' },
-  { time: '07:32', text: '再睡五分钟', type: 'user' },
-  { time: '07:35', text: '好的，5分钟后再叫您', type: 'assistant' },
-]
 
 // ============== UTILS ==============
 function formatDays(days: number): string {
@@ -154,12 +134,76 @@ function CSIChart({ data, threshold }: { data: CSIPoint[]; threshold: number }) 
 // ============== MAIN APP ==============
 function App() {
   const [activeTab, setActiveTab] = useState('dashboard')
-  const [devices] = useState<Device[]>(mockDevices)
-  const [alarms, setAlarms] = useState<Alarm[]>(mockAlarms)
+  const [devices, setDevices] = useState<Device[]>([])
+  const [alarms, setAlarms] = useState<Alarm[]>([])
+  const [csiHistory, setCsiHistory] = useState<CSIPoint[]>([])
+  const [voiceLogs] = useState<VoiceLog[]>([])
   const [csiThreshold, setCsiThreshold] = useState(15)
   const [ledBrightness, setLedBrightness] = useState([20])
   const [isLightOn, setIsLightOn] = useState(false)
   const [isNightMode, setIsNightMode] = useState(false)
+
+  // Fetch devices from backend
+  useEffect(() => {
+    const fetchDevices = async () => {
+      try {
+        const res = await fetch('/api/devices')
+        const data = await res.json()
+        setDevices(
+          (data.devices || []).map((d: any) => ({
+            device_id: d.device_id,
+            name: d.name || d.device_id,
+            is_online: d.is_online ?? false,
+            wifi_rssi: d.wifi_rssi ?? 0,
+            firmware_version: d.firmware_version || '',
+          }))
+        )
+      } catch (e) {
+        console.error('Failed to fetch devices:', e)
+      }
+    }
+    fetchDevices()
+    const interval = setInterval(fetchDevices, 3000)
+    return () => clearInterval(interval)
+  }, [])
+
+  // Fetch alarms for first device
+  useEffect(() => {
+    const fetchAlarms = async () => {
+      if (devices.length === 0) {
+        setAlarms([])
+        return
+      }
+      try {
+        const res = await fetch(`/api/alarms/${devices[0].device_id}`)
+        const data = await res.json()
+        setAlarms(data.alarms || [])
+      } catch (e) {
+        console.error('Failed to fetch alarms:', e)
+      }
+    }
+    fetchAlarms()
+  }, [devices])
+
+  // Fetch CSI data for first device
+  useEffect(() => {
+    const fetchCSI = async () => {
+      if (devices.length === 0) {
+        setCsiHistory([])
+        return
+      }
+      try {
+        const res = await fetch(`/api/csi/${devices[0].device_id}?limit=60`)
+        const data = await res.json()
+        setCsiHistory(data.data || [])
+      } catch (e) {
+        console.error('Failed to fetch CSI:', e)
+      }
+    }
+    fetchCSI()
+    const interval = setInterval(fetchCSI, 3000)
+    return () => clearInterval(interval)
+  }, [devices])
 
   useEffect(() => {
     const hour = new Date().getHours()
@@ -276,7 +320,7 @@ function App() {
                 devices={devices}
                 alarms={alarms}
                 csiThreshold={csiThreshold}
-                voiceLogs={mockVoiceLogs}
+                voiceLogs={voiceLogs}
                 isNightMode={isNightMode}
                 currentTime={currentTime}
                 nextAlarm={nextAlarm}
@@ -293,8 +337,8 @@ function App() {
             {activeTab === 'alarm' && (
               <AlarmTab alarms={alarms} addAlarm={addAlarm} updateAlarm={updateAlarm} deleteAlarm={deleteAlarm} />
             )}
-            {activeTab === 'csi' && <CSITab csiThreshold={csiThreshold} setCsiThreshold={setCsiThreshold} mockCSIHistory={mockCSIHistory} />}
-            {activeTab === 'voice' && <VoiceTab voiceLogs={mockVoiceLogs} />}
+            {activeTab === 'csi' && <CSITab csiThreshold={csiThreshold} setCsiThreshold={setCsiThreshold} csiHistory={csiHistory} />}
+            {activeTab === 'voice' && <VoiceTab voiceLogs={voiceLogs} />}
             {activeTab === 'settings' && <SettingsTab devices={devices} />}
           </main>
         </div>
@@ -386,7 +430,7 @@ function DashboardTab({
         </CardHeader>
         <CardContent>
           <div className="space-y-3">
-            {mockVoiceLogs.slice(-3).map((log, i) => (
+            {voiceLogs.slice(-3).map((log, i) => (
               <div key={i} className={`flex gap-3 ${log.type === 'user' ? 'flex-row-reverse' : ''}`}>
                 <div
                   className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${
@@ -636,11 +680,11 @@ function AlarmTab({
 function CSITab({
   csiThreshold,
   setCsiThreshold,
-  mockCSIHistory,
+  csiHistory,
 }: {
   csiThreshold: number
   setCsiThreshold: (v: number) => void
-  mockCSIHistory: CSIPoint[]
+  csiHistory: CSIPoint[]
 }) {
   return (
     <div className="space-y-6">
@@ -651,17 +695,21 @@ function CSITab({
         <CardContent className="space-y-6">
           {/* Status Cards */}
           <div className="grid grid-cols-4 gap-4">
-            <StatusCard title="人体存在" value="检测到" status="success" />
-            <StatusCard title="活动状态" value="躺着" status="info" />
-            <StatusCard title="呼吸频率" value="16.5 次/分" status="info" />
-            <StatusCard title="信号方差" value="15.3" status="warning" />
+            <StatusCard title="人体存在" value={csiHistory.length > 0 && csiHistory[csiHistory.length - 1].presence > 0 ? "检测到" : "未检测"} status={csiHistory.length > 0 && csiHistory[csiHistory.length - 1].presence > 0 ? "success" : "neutral"} />
+            <StatusCard title="数据点" value={String(csiHistory.length)} status="info" />
+            <StatusCard title="当前方差" value={csiHistory.length > 0 ? String(csiHistory[csiHistory.length - 1].variance.toFixed(1)) : "-"} status="info" />
+            <StatusCard title="阈值" value={String(csiThreshold)} status="warning" />
           </div>
 
           {/* CSI Chart */}
           <div className="mt-6">
             <h3 className="text-sm font-semibold text-stone-700 mb-3">CSI 信号变化</h3>
             <div className="relative h-48 bg-stone-50 rounded-xl overflow-hidden">
-              <CSIChart data={mockCSIHistory} threshold={csiThreshold} />
+              {csiHistory.length > 0 ? (
+                <CSIChart data={csiHistory} threshold={csiThreshold} />
+              ) : (
+                <div className="flex items-center justify-center h-full text-stone-400 text-sm">暂无 CSI 数据</div>
+              )}
             </div>
           </div>
 
@@ -706,22 +754,22 @@ function CSITab({
           <CardTitle className="text-lg">检测日志</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="space-y-2">
-            {[
-              { time: '07:30:15', event: '检测到人体', state: '躺着', confidence: '95%' },
-              { time: '07:35:22', event: '状态变化', state: '坐起', confidence: '88%' },
-              { time: '07:36:01', event: '人员离开', state: '-', confidence: '92%' },
-            ].map((log, i) => (
-              <div key={i} className="flex items-center gap-4 py-2 px-3 rounded-lg hover:bg-stone-50">
-                <span className="text-xs text-stone-400 w-20">{log.time}</span>
-                <span className="text-sm text-stone-700 flex-1">{log.event}</span>
-                <span className="text-xs text-stone-500">{log.state}</span>
-                <Badge variant="outline" className="text-green-600 border-green-200 bg-green-50">
-                  {log.confidence}
-                </Badge>
-              </div>
-            ))}
-          </div>
+          {csiHistory.length > 0 ? (
+            <div className="space-y-2">
+              {csiHistory.slice(-5).reverse().map((log, i) => (
+                <div key={i} className="flex items-center gap-4 py-2 px-3 rounded-lg hover:bg-stone-50">
+                  <span className="text-xs text-stone-400 w-20">{new Date(log.time * 1000).toLocaleTimeString('zh-CN')}</span>
+                  <span className="text-sm text-stone-700 flex-1">{log.presence > 0 ? '检测到人体' : '未检测到人体'}</span>
+                  <span className="text-xs text-stone-500">方差: {log.variance.toFixed(1)}</span>
+                  <Badge variant="outline" className={log.presence > 0 ? "text-green-600 border-green-200 bg-green-50" : "text-stone-500 border-stone-200 bg-stone-50"}>
+                    {log.presence > 0 ? '有' : '无'}
+                  </Badge>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-sm text-stone-400 py-4">暂无检测日志</div>
+          )}
         </CardContent>
       </Card>
     </div>

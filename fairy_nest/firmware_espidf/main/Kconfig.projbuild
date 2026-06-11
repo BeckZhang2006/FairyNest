@@ -1,0 +1,46 @@
+menu "FairyNest Configuration"
+
+    config FAIRYNEST_WIFI_SSID
+        string "WiFi SSID"
+        default "YOUR_WIFI_SSID"
+        help
+            WiFi network name (SSID) to connect to. Must be 2.4GHz band.
+
+    config FAIRYNEST_WIFI_PASS
+        string "WiFi Password"
+        default "YOUR_WIFI_PASSWORD"
+        help
+            WiFi network password.
+
+    config FAIRYNEST_CLOUD_HOST
+        string "Cloud Server Host"
+        default "your-server.com"
+        help
+            Hostname or IP address of the FairyNest cloud server.
+
+    config FAIRYNEST_CLOUD_PORT
+        int "Cloud Server Port"
+        default 80
+        help
+            WebSocket port of the cloud server.
+
+    config FAIRYNEST_CLOUD_PATH
+        string "WebSocket Path"
+        default "/ws/device"
+        help
+            WebSocket endpoint path.
+
+    config FAIRYNEST_API_KEY
+        string "Device API Key"
+        default "YOUR_DEVICE_API_KEY"
+        help
+            API key for authenticating with the cloud server.
+
+    config FAIRYNEST_TIMEZONE
+        string "Timezone String"
+        default "CST-8"
+        help
+            TZ environment variable string. Default is China (GMT+8).
+            Examples: "EST5EDT,M3.2.0,M11.1.0" (US Eastern)
+
+endmenu
