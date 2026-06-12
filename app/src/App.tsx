@@ -137,7 +137,7 @@ function App() {
   const [devices, setDevices] = useState<Device[]>([])
   const [alarms, setAlarms] = useState<Alarm[]>([])
   const [csiHistory, setCsiHistory] = useState<CSIPoint[]>([])
-  const [voiceLogs, setVoiceLogs] = useState<VoiceLog[]>([
+  const [voiceLogs, _setVoiceLogs] = useState<VoiceLog[]>([
     { time: '08:30', text: '早上好，今天天气怎么样？', type: 'user' },
     { time: '08:30', text: '早上好！今天晴天，气温 25 度，适合外出。', type: 'assistant' },
   ])
