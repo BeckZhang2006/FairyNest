@@ -40,6 +40,7 @@ from contextlib import asynccontextmanager
 
 import numpy as np
 import soundfile as sf
+import librosa
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -352,6 +353,23 @@ async def handle_text_message(device_conn: DeviceConnection, text: str):
             except Exception as e:
                 logger.error(f"Failed to update device status: {e}")
             
+            # 新增：保存 CSI 数据到数据库
+            csi_variance = data.get("csi_variance")
+            presence_state_num = data.get("presence_state", 0)
+            if csi_variance is not None:
+                try:
+                    async with AsyncSessionLocal() as session:
+                        record = CSIData(
+                            device_id=device_conn.device_id,
+                            variance=csi_variance,
+                            presence_state="present" if presence_state_num != 0 else "empty",
+                            timestamp=datetime.utcnow()
+                        )
+                        session.add(record)
+                        await session.commit()
+                except Exception as e:
+                    logger.error(f"Failed to save CSI data from status: {e}")
+            
         elif msg_type == "voice_event":
             # Voice recording event
             event = data.get("event", "")
@@ -438,6 +456,12 @@ async def process_voice_command(device_conn: DeviceConnection):
         
         logger.info(f"Audio saved: {tmp_path} ({len(audio_array)} samples)")
         
+        # 新增：音频预处理（VAD、降噪、归一化）
+        if SERVICES_AVAILABLE:
+            audio_processor = app.state.audio_processor
+            tmp_path = audio_processor.preprocess_for_asr(tmp_path)
+            logger.info(f"Audio preprocessed: {tmp_path}")
+        
         # Speech recognition
         if SERVICES_AVAILABLE:
             speech_service = app.state.speech_service
@@ -469,6 +493,9 @@ async def process_voice_command(device_conn: DeviceConnection):
 async def handle_voice_text(device_conn: DeviceConnection, text: str):
     """Handle recognized voice text - intent recognition and LLM processing"""
     try:
+        # Note: voice_result is sent by process_voice_command for cloud ASR.
+        # For local voice_command, the device already knows the text.
+        
         # Check for local commands first
         text_lower = text.lower()
         
@@ -550,6 +577,24 @@ async def send_tts_to_device(device_conn: DeviceConnection, text: str):
         audio_path = await tts_service.synthesize(text)
         
         if audio_path and os.path.exists(audio_path):
+            # 检查并确保音频格式为 PCM 16kHz mono
+            if SERVICES_AVAILABLE:
+                audio_processor = app.state.audio_processor
+                try:
+                    audio_array, sr = audio_processor.load_audio(audio_path)
+                    # 如果是多声道，转换为单声道
+                    if audio_array.ndim > 1:
+                        audio_array = librosa.to_mono(audio_array.T)
+                    # 如果采样率不是 16000，重采样
+                    if sr != 16000:
+                        audio_array = librosa.resample(audio_array, orig_sr=sr, target_sr=16000)
+                    # 保存为 PCM 16 位 WAV
+                    pcm_path = tempfile.mktemp(suffix=".wav")
+                    sf.write(pcm_path, audio_array, 16000, subtype='PCM_16')
+                    audio_path = pcm_path
+                except Exception as e:
+                    logger.warning(f"Audio format conversion failed: {e}, using original file")
+            
             # Read audio file
             with open(audio_path, 'rb') as f:
                 audio_data = f.read()
