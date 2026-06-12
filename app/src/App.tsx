@@ -137,7 +137,10 @@ function App() {
   const [devices, setDevices] = useState<Device[]>([])
   const [alarms, setAlarms] = useState<Alarm[]>([])
   const [csiHistory, setCsiHistory] = useState<CSIPoint[]>([])
-  const [voiceLogs] = useState<VoiceLog[]>([])
+  const [voiceLogs, setVoiceLogs] = useState<VoiceLog[]>([
+    { time: '08:30', text: '早上好，今天天气怎么样？', type: 'user' },
+    { time: '08:30', text: '早上好！今天晴天，气温 25 度，适合外出。', type: 'assistant' },
+  ])
   const [csiThreshold, setCsiThreshold] = useState(15)
   const [ledBrightness, setLedBrightness] = useState([20])
   const [isLightOn, setIsLightOn] = useState(false)
@@ -209,6 +212,73 @@ function App() {
     const hour = new Date().getHours()
     setIsNightMode(hour >= 22 || hour < 6)
   }, [])
+
+  const updateCsiThreshold = async (value: number) => {
+    setCsiThreshold(value)
+    if (devices.length > 0) {
+      try {
+        await fetch('/api/csi/threshold', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ device_id: devices[0].device_id, threshold: value })
+        })
+      } catch (e) {
+        console.error('Failed to update threshold:', e)
+      }
+    }
+  }
+
+  const toggleLight = async (on: boolean) => {
+    setIsLightOn(on)
+    if (devices.length > 0) {
+      try {
+        await fetch(`/api/devices/${devices[0].device_id}/command`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: 'set_light', brightness: on ? ledBrightness[0] : 0 })
+        })
+      } catch (e) {
+        console.error('Failed to send light command:', e)
+      }
+    }
+  }
+
+  const updateLightBrightness = async (value: number[]) => {
+    setLedBrightness(value)
+    if (devices.length > 0 && isLightOn) {
+      try {
+        await fetch(`/api/devices/${devices[0].device_id}/command`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: 'set_light', brightness: value[0] })
+        })
+      } catch (e) {
+        console.error('Failed to send brightness command:', e)
+      }
+    }
+  }
+
+  const handleSnooze = async () => {
+    if (devices.length > 0) {
+      try {
+        await fetch(`/api/devices/${devices[0].device_id}/command`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: 'snooze' })
+        })
+        toast.success('贪睡模式已启动，5分钟后再次提醒')
+      } catch (e) {
+        console.error('Failed to send snooze command:', e)
+        toast.error('发送贪睡命令失败')
+      }
+    } else {
+      toast.info('暂无设备连接')
+    }
+  }
+
+  const handleVoiceWake = () => {
+    toast.info('语音助手唤醒中...')
+  }
 
   const addAlarm = () => {
     const newAlarm: Alarm = {
@@ -323,20 +393,24 @@ function App() {
                 isNightMode={isNightMode}
                 currentTime={currentTime}
                 nextAlarm={nextAlarm}
+                isLightOn={isLightOn}
+                toggleLight={toggleLight}
+                handleSnooze={handleSnooze}
+                handleVoiceWake={handleVoiceWake}
               />
             )}
             {activeTab === 'light' && (
               <LightTab
                 isOn={isLightOn}
-                setIsOn={setIsLightOn}
+                toggleLight={toggleLight}
                 brightness={ledBrightness}
-                setBrightness={setLedBrightness}
+                updateBrightness={updateLightBrightness}
               />
             )}
             {activeTab === 'alarm' && (
               <AlarmTab alarms={alarms} addAlarm={addAlarm} updateAlarm={updateAlarm} deleteAlarm={deleteAlarm} />
             )}
-            {activeTab === 'csi' && <CSITab csiThreshold={csiThreshold} setCsiThreshold={setCsiThreshold} csiHistory={csiHistory} />}
+            {activeTab === 'csi' && <CSITab csiThreshold={csiThreshold} setCsiThreshold={updateCsiThreshold} csiHistory={csiHistory} />}
             {activeTab === 'voice' && <VoiceTab voiceLogs={voiceLogs} />}
             {activeTab === 'settings' && <SettingsTab devices={devices} />}
           </main>
@@ -369,6 +443,10 @@ function DashboardTab({
   isNightMode,
   currentTime,
   nextAlarm,
+  isLightOn,
+  toggleLight,
+  handleSnooze,
+  handleVoiceWake,
 }: {
   devices: Device[]
   csiThreshold: number
@@ -376,6 +454,10 @@ function DashboardTab({
   isNightMode: boolean
   currentTime: string
   nextAlarm?: Alarm
+  isLightOn: boolean
+  toggleLight: (on: boolean) => void
+  handleSnooze: () => void
+  handleVoiceWake: () => void
 }) {
   return (
     <div className="space-y-6">
@@ -417,9 +499,9 @@ function DashboardTab({
 
       {/* Quick Actions */}
       <div className="grid grid-cols-3 gap-4">
-        <QuickActionCard icon={<Lightbulb size={24} />} title="夜灯开关" desc="控制床头夜灯" color="from-amber-400 to-amber-600" />
-        <QuickActionCard icon={<Bell size={24} />} title="贪睡模式" desc="延时5分钟提醒" color="from-blue-400 to-blue-600" />
-        <QuickActionCard icon={<Mic size={24} />} title="语音助手" desc="唤醒语音助手" color="from-purple-400 to-purple-600" />
+        <QuickActionCard icon={<Lightbulb size={24} />} title="夜灯开关" desc="控制床头夜灯" color="from-amber-400 to-amber-600" onClick={() => toggleLight(!isLightOn)} />
+        <QuickActionCard icon={<Bell size={24} />} title="贪睡模式" desc="延时5分钟提醒" color="from-blue-400 to-blue-600" onClick={handleSnooze} />
+        <QuickActionCard icon={<Mic size={24} />} title="语音助手" desc="唤醒语音助手" color="from-purple-400 to-purple-600" onClick={handleVoiceWake} />
       </div>
 
       {/* Recent Logs */}
@@ -455,9 +537,9 @@ function DashboardTab({
   )
 }
 
-function QuickActionCard({ icon, title, desc, color }: { icon: React.ReactNode; title: string; desc: string; color: string }) {
+function QuickActionCard({ icon, title, desc, color, onClick }: { icon: React.ReactNode; title: string; desc: string; color: string; onClick?: () => void }) {
   return (
-    <button className="bg-white rounded-2xl shadow-sm p-5 hover:shadow-md transition-shadow text-left group">
+    <button onClick={onClick} className="bg-white rounded-2xl shadow-sm p-5 hover:shadow-md transition-shadow text-left group">
       <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${color} flex items-center justify-center text-white mb-3 group-hover:scale-110 transition-transform`}>
         {icon}
       </div>
@@ -470,14 +552,14 @@ function QuickActionCard({ icon, title, desc, color }: { icon: React.ReactNode; 
 // ============== LIGHT TAB ==============
 function LightTab({
   isOn,
-  setIsOn,
+  toggleLight,
   brightness,
-  setBrightness,
+  updateBrightness,
 }: {
   isOn: boolean
-  setIsOn: (v: boolean) => void
+  toggleLight: (v: boolean) => void
   brightness: number[]
-  setBrightness: (v: number[]) => void
+  updateBrightness: (v: number[]) => void
 }) {
   const presets = [
     { label: '夜灯', value: 10 },
@@ -508,14 +590,14 @@ function LightTab({
                 <p className="text-sm text-stone-500">{brightness[0]}% 亮度</p>
               </div>
             </div>
-            <Switch checked={isOn} onCheckedChange={setIsOn} />
+            <Switch checked={isOn} onCheckedChange={toggleLight} />
           </div>
 
           {isOn && (
             <div className="space-y-4 animate-in fade-in slide-in-from-top-2">
               <div>
                 <Label className="text-sm font-medium text-stone-700 mb-2 block">亮度调节</Label>
-                <Slider value={brightness} onValueChange={setBrightness} max={100} step={1} className="w-full" />
+                <Slider value={brightness} onValueChange={updateBrightness} max={100} step={1} className="w-full" />
                 <div className="flex justify-between text-xs text-stone-400 mt-1">
                   <span>暗</span>
                   <span>亮</span>
@@ -530,7 +612,7 @@ function LightTab({
                       key={preset.label}
                       variant={brightness[0] === preset.value ? 'default' : 'outline'}
                       size="sm"
-                      onClick={() => setBrightness([preset.value])}
+                      onClick={() => updateBrightness([preset.value])}
                       className={brightness[0] === preset.value ? 'bg-orange-500 hover:bg-orange-600' : ''}
                     >
                       {preset.label}
