@@ -3,7 +3,7 @@
  * React + TypeScript + Tailwind CSS + shadcn/ui
  */
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -137,7 +137,7 @@ function App() {
   const [devices, setDevices] = useState<Device[]>([])
   const [alarms, setAlarms] = useState<Alarm[]>([])
   const [csiHistory, setCsiHistory] = useState<CSIPoint[]>([])
-  const [voiceLogs, _setVoiceLogs] = useState<VoiceLog[]>([
+  const [voiceLogs] = useState<VoiceLog[]>([
     { time: '08:30', text: '早上好，今天天气怎么样？', type: 'user' },
     { time: '08:30', text: '早上好！今天晴天，气温 25 度，适合外出。', type: 'assistant' },
   ])
@@ -145,6 +145,13 @@ function App() {
   const [ledBrightness, setLedBrightness] = useState([20])
   const [isLightOn, setIsLightOn] = useState(false)
   const [isNightMode, setIsNightMode] = useState(false)
+  const [currentTime, setCurrentTime] = useState(new Date())
+  const [isLoading, setIsLoading] = useState(false)
+
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(new Date()), 1000)
+    return () => clearInterval(timer)
+  }, [])
 
   // Fetch devices from backend
   useEffect(() => {
@@ -280,30 +287,111 @@ function App() {
     toast.info('语音助手唤醒中...')
   }
 
-  const addAlarm = () => {
+  const deviceId = devices[0]?.device_id
+
+  const addAlarm = async () => {
+    if (!deviceId) {
+      toast.error('暂无设备连接')
+      return
+    }
+    const newIndex = Math.max(-1, ...alarms.map((a) => a.index)) + 1
     const newAlarm: Alarm = {
-      index: alarms.length,
+      index: newIndex,
       enabled: true,
       hour: 8,
       minute: 0,
       days: 0b0111110,
       label: '新闹钟',
     }
-    setAlarms([...alarms, newAlarm])
-    toast.success('闹钟已添加')
+    setIsLoading(true)
+    try {
+      const res = await fetch(`/api/alarms/${deviceId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newAlarm),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      setAlarms([...alarms, newAlarm])
+      toast.success('闹钟已添加')
+    } catch (e) {
+      toast.error('添加闹钟失败')
+      console.error('Failed to add alarm:', e)
+    } finally {
+      setIsLoading(false)
+    }
   }
 
-  const updateAlarm = (index: number, updates: Partial<Alarm>) => {
-    setAlarms(alarms.map((a) => (a.index === index ? { ...a, ...updates } : a)))
+  const updateAlarm = async (index: number, updates: Partial<Alarm>) => {
+    const alarm = alarms.find((a) => a.index === index)
+    if (!alarm || !deviceId) return
+    const updated = { ...alarm, ...updates }
+    try {
+      const res = await fetch(`/api/alarms/${deviceId}/${index}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updated),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      setAlarms(alarms.map((a) => (a.index === index ? updated : a)))
+    } catch (e) {
+      toast.error('更新闹钟失败')
+      console.error('Failed to update alarm:', e)
+    }
   }
 
-  const deleteAlarm = (index: number) => {
-    setAlarms(alarms.filter((a) => a.index !== index))
-    toast.success('闹钟已删除')
+  const deleteAlarm = async (index: number) => {
+    if (!deviceId) return
+    try {
+      const res = await fetch(`/api/alarms/${deviceId}/${index}`, {
+        method: 'DELETE',
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      setAlarms(alarms.filter((a) => a.index !== index))
+      toast.success('闹钟已删除')
+    } catch (e) {
+      toast.error('删除闹钟失败')
+      console.error('Failed to delete alarm:', e)
+    }
   }
 
-  const currentTime = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-  const nextAlarm = alarms.find((a) => a.enabled)
+  const currentTimeStr = currentTime.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+
+  const nextAlarm = useMemo(() => {
+    const getNextOccurrence = (alarm: Alarm, from: Date): Date | undefined => {
+      if (!alarm.enabled) return undefined
+      const currentDay = from.getDay()
+      const currentMinutes = from.getHours() * 60 + from.getMinutes()
+      const alarmMinutes = alarm.hour * 60 + alarm.minute
+
+      if (alarm.days === 0) {
+        if (alarmMinutes <= currentMinutes) return undefined
+        const next = new Date(from)
+        next.setHours(alarm.hour, alarm.minute, 0, 0)
+        return next
+      }
+
+      for (let offset = 0; offset < 7; offset++) {
+        const candidateDay = (currentDay + offset) % 7
+        if (alarm.days & (1 << candidateDay)) {
+          if (offset === 0 && alarmMinutes <= currentMinutes) continue
+          const next = new Date(from)
+          next.setDate(next.getDate() + offset)
+          next.setHours(alarm.hour, alarm.minute, 0, 0)
+          return next
+        }
+      }
+      return undefined
+    }
+
+    let best: { alarm: Alarm; time: Date } | undefined
+    for (const alarm of alarms) {
+      const time = getNextOccurrence(alarm, currentTime)
+      if (time && (!best || time < best.time)) {
+        best = { alarm, time }
+      }
+    }
+    return best?.alarm
+  }, [alarms, currentTime])
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-stone-50 to-orange-50/30">
@@ -391,7 +479,7 @@ function App() {
                 csiThreshold={csiThreshold}
                 voiceLogs={voiceLogs}
                 isNightMode={isNightMode}
-                currentTime={currentTime}
+                currentTime={currentTimeStr}
                 nextAlarm={nextAlarm}
                 isLightOn={isLightOn}
                 toggleLight={toggleLight}
@@ -408,7 +496,7 @@ function App() {
               />
             )}
             {activeTab === 'alarm' && (
-              <AlarmTab alarms={alarms} addAlarm={addAlarm} updateAlarm={updateAlarm} deleteAlarm={deleteAlarm} />
+              <AlarmTab alarms={alarms} addAlarm={addAlarm} updateAlarm={updateAlarm} deleteAlarm={deleteAlarm} isLoading={isLoading} />
             )}
             {activeTab === 'csi' && <CSITab csiThreshold={csiThreshold} setCsiThreshold={updateCsiThreshold} csiHistory={csiHistory} />}
             {activeTab === 'voice' && <VoiceTab voiceLogs={voiceLogs} />}
@@ -655,17 +743,29 @@ function AlarmTab({
   addAlarm,
   updateAlarm,
   deleteAlarm,
+  isLoading,
 }: {
   alarms: Alarm[]
   addAlarm: () => void
   updateAlarm: (index: number, updates: Partial<Alarm>) => void
   deleteAlarm: (index: number) => void
+  isLoading?: boolean
 }) {
+  const dayButtons = [
+    { label: '一', bit: 1 },
+    { label: '二', bit: 2 },
+    { label: '三', bit: 3 },
+    { label: '四', bit: 4 },
+    { label: '五', bit: 5 },
+    { label: '六', bit: 6 },
+    { label: '日', bit: 0 },
+  ]
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-semibold text-stone-900">闹钟管理</h2>
-        <Button onClick={addAlarm} className="bg-orange-500 hover:bg-orange-600">
+        <Button onClick={addAlarm} disabled={isLoading || alarms.length >= 5} className="bg-orange-500 hover:bg-orange-600">
           <Plus size={16} className="mr-1" />
           添加闹钟
         </Button>
@@ -700,6 +800,7 @@ function AlarmTab({
               </div>
 
               {alarm.enabled && (
+                <>
                 <div className="mt-4 pt-4 border-t border-stone-100 grid grid-cols-3 gap-4">
                   <div>
                     <Label className="text-xs text-stone-500 block mb-1">小时</Label>
@@ -733,6 +834,29 @@ function AlarmTab({
                     />
                   </div>
                 </div>
+
+                <div className="mt-4">
+                  <Label className="text-xs text-stone-500 block mb-2">重复</Label>
+                  <div className="flex gap-2">
+                    {dayButtons.map((day) => {
+                      const active = Boolean(alarm.days & (1 << day.bit))
+                      return (
+                        <button
+                          key={day.label}
+                          onClick={() => updateAlarm(alarm.index, { days: alarm.days ^ (1 << day.bit) })}
+                          className={`w-8 h-8 rounded-lg text-xs font-medium transition-colors ${
+                            active
+                              ? 'bg-orange-500 text-white'
+                              : 'bg-stone-100 text-stone-500 hover:bg-stone-200'
+                          }`}
+                        >
+                          {day.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+                </>
               )}
             </CardContent>
           </Card>
