@@ -719,19 +719,94 @@ async def get_alarms(device_id: str):
         logger.error(f"Failed to get alarms: {e}")
         return {"device_id": device_id, "alarms": []}
 
-@app.post("/api/alarms/{device_id}")
-async def set_alarm(device_id: str, alarm: AlarmConfig):
-    """Set alarm for a device"""
+async def _persist_alarm(device_id: str, alarm: AlarmConfig):
+    """Upsert an alarm record in the database."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Alarm).where(Alarm.device_id == device_id, Alarm.alarm_index == alarm.index)
+        )
+        db_alarm = result.scalar_one_or_none()
+        if db_alarm:
+            db_alarm.enabled = alarm.enabled
+            db_alarm.hour = alarm.hour
+            db_alarm.minute = alarm.minute
+            db_alarm.days = alarm.days
+            db_alarm.label = alarm.label
+        else:
+            db_alarm = Alarm(
+                device_id=device_id,
+                alarm_index=alarm.index,
+                enabled=alarm.enabled,
+                hour=alarm.hour,
+                minute=alarm.minute,
+                days=alarm.days,
+                label=alarm.label,
+            )
+            session.add(db_alarm)
+        await session.commit()
+
+
+async def _forward_set_alarm(device_id: str, alarm: AlarmConfig):
+    """Forward set_alarm command to the device if it is online."""
     conn = device_manager.get_device(device_id)
-    if not conn:
-        raise HTTPException(status_code=404, detail="Device not connected")
-    
-    await conn.send_json({
-        "command": "set_alarm",
-        **alarm.model_dump()
-    })
-    
+    if conn:
+        await conn.send_json({
+            "command": "set_alarm",
+            **alarm.model_dump()
+        })
+
+
+@app.post("/api/alarms/{device_id}")
+async def create_or_update_alarm(device_id: str, alarm: AlarmConfig):
+    """Create or update a single alarm for a device.
+
+    The alarm is persisted to the database and forwarded to the device if online.
+    """
+    await _persist_alarm(device_id, alarm)
+    await _forward_set_alarm(device_id, alarm)
     return {"success": True, "alarm": alarm.model_dump()}
+
+
+@app.put("/api/alarms/{device_id}/{alarm_index}")
+async def update_alarm(device_id: str, alarm_index: int, alarm: AlarmConfig):
+    """Update a specific alarm by index.
+
+    The alarm index in the path must match the index in the request body.
+    """
+    if alarm.index != alarm_index:
+        raise HTTPException(status_code=400, detail="Alarm index mismatch")
+    await _persist_alarm(device_id, alarm)
+    await _forward_set_alarm(device_id, alarm)
+    return {"success": True, "alarm": alarm.model_dump()}
+
+
+@app.delete("/api/alarms/{device_id}/{alarm_index}")
+async def delete_alarm(device_id: str, alarm_index: int):
+    """Delete a specific alarm by index.
+
+    The alarm is removed from the database and disabled on the device.
+    """
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Alarm).where(Alarm.device_id == device_id, Alarm.alarm_index == alarm_index)
+        )
+        db_alarm = result.scalar_one_or_none()
+        if db_alarm:
+            await session.delete(db_alarm)
+            await session.commit()
+
+    # Notify the device to disable this alarm slot
+    disabled_alarm = AlarmConfig(
+        index=alarm_index,
+        enabled=False,
+        hour=0,
+        minute=0,
+        days=0,
+        label="",
+    )
+    await _forward_set_alarm(device_id, disabled_alarm)
+
+    return {"success": True, "deleted_index": alarm_index}
 
 @app.get("/api/csi/{device_id}")
 async def get_csi_data(device_id: str, limit: int = 100):
