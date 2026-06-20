@@ -25,6 +25,7 @@ static const char *TAG = TAG_WS;
 static esp_websocket_client_handle_t s_ws_client = NULL;
 static char s_ws_buffer[WS_BUFFER_SIZE];
 static bool s_ws_connected = false;
+static bool s_ws_running  = false;  // esp_websocket_client_start() has been called
 
 // Exponential backoff
 #define WS_BACKOFF_MS_INITIAL   1000
@@ -198,6 +199,7 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base,
             ESP_LOGI(TAG, "WebSocket connected");
             s_ws_connected = true;
             g_state.ws_connected = true;
+            s_ws_running = true;  // Client is up and connected
             s_backoff_ms = WS_BACKOFF_MS_INITIAL;  // Reset backoff
             xEventGroupSetBits(g_event_group, EVENT_WS_CONNECTED);
             xEventGroupClearBits(g_event_group, EVENT_WS_DISCONNECTED);
@@ -210,6 +212,8 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base,
             g_state.ws_connected = false;
             xEventGroupClearBits(g_event_group, EVENT_WS_CONNECTED);
             xEventGroupSetBits(g_event_group, EVENT_WS_DISCONNECTED);
+            // Keep s_ws_running = true: the client is still started and will
+            // auto-reconnect via reconnect_timeout_ms.
             break;
 
         case WEBSOCKET_EVENT_DATA:
@@ -300,14 +304,22 @@ void websocket_task(void *pvParameters)
 
         if (!(bits & EVENT_WIFI_CONNECTED)) {
             // WiFi not connected
-            if (s_ws_connected) {
+            if (s_ws_running) {
                 esp_websocket_client_stop(s_ws_client);
+                s_ws_running = false;
+                s_ws_connected = false;
             }
+            // Yield CPU and retry after a delay. This prevents busy-looping
+            // when EVENT_WIFI_FAIL is already set, which would starve IDLE
+            // and trigger the task watchdog.
+            vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
 
-        // Start WebSocket if not connected
-        if (!s_ws_connected) {
+        // Start WebSocket if it is not already started. Once started, the
+        // client will handle auto-reconnect internally; we must not call
+        // esp_websocket_client_start() again.
+        if (!s_ws_running) {
             ESP_LOGI(TAG, "Connecting to WebSocket server...");
             esp_err_t ret = esp_websocket_client_start(s_ws_client);
             if (ret != ESP_OK) {
@@ -316,6 +328,7 @@ void websocket_task(void *pvParameters)
                 s_backoff_ms = MIN(s_backoff_ms * 2, WS_BACKOFF_MS_MAX);
                 continue;
             }
+            s_ws_running = true;
         }
 
         // Check message queue for outbound messages
